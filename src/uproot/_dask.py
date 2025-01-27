@@ -382,6 +382,8 @@ def _dask_array_from_map(
     **kwargs,
 ):
     dask = uproot.extras.dask()
+    _dask_uses_tasks = hasattr(dask, "_task_spec")
+
     da = uproot.extras.dask_array()
     if not callable(func):
         raise ValueError("`func` argument must be `callable`")
@@ -445,14 +447,22 @@ def _dask_array_from_map(
         produces_tasks=produces_tasks,
     )
 
-    dsk = dask.blockwise.Blockwise(
-        output=name,
-        output_indices="i",
-        dsk={name: (io_func, dask.blockwise.blockwise_token(0))},
-        indices=[(io_arg_map, "i")],
-        numblocks={},
-        annotations=None,
-    )
+    blockwise_kwargs = {
+        "output": name,
+        "output_indices": "i",
+        "indices": [(io_arg_map, "i")],
+        "numblocks": {},
+        "annotations": None,
+    }
+
+    if _dask_uses_tasks:
+        blockwise_kwargs["task"] = dask._task_spec.Task(
+            name, io_func, dask._task_spec.TaskRef(dask.blockwise.blockwise_token(0))
+        )
+    else:
+        blockwise_kwargs["dsk"] = {name: (io_func, dask.blockwise.blockwise_token(0))}
+
+    dsk = dask.blockwise.Blockwise(**blockwise_kwargs)
 
     hlg = dask.highlevelgraph.HighLevelGraph.from_collections(name, dsk)
     return da.core.Array(hlg, name, chunks, dtype=dtype)
@@ -888,7 +898,7 @@ class TrivialFormMappingInfo(ImplementsFormMappingInfo):
         keys: set[str] = set()
         for buffer_key in buffer_keys:
             # Identify form key
-            form_key, attribute = buffer_key.replace("@.", "<root>.").rsplit(
+            form_key, *attribute = buffer_key.replace("@.", "<root>.").rsplit(
                 "-", maxsplit=1
             )
             # Identify key from form_key
@@ -1036,16 +1046,22 @@ class UprootReadMixin:
         return self.expected_form
 
     def project(self, columns) -> T:
-        from dask_awkward.lib.utils import _buf_to_col
-
-        keys = [_buf_to_col(c).replace(".", "_") for c in columns]
-        if not isinstance(self.form_mapping_info, TrivialFormMappingInfo):
-            roots = {_.split("_", 1)[0] for _ in keys if "_" in _}
-            keys.extend([f"n{_}" for _ in roots])
+        # translate buffer keys to TBranch keys
+        keys = self.form_mapping_info.keys_for_buffer_keys(columns)
         return self.project_keys(keys)
 
     def project_keys(self: T, keys: frozenset[str]) -> T:
         raise NotImplementedError
+
+
+    def mock_empty(self, backend) -> AwkArray:
+        awkward = uproot.extras.awkward()
+        return awkward.to_backend(
+            self.expected_form.length_zero_array(highlevel=False),
+            backend=backend,
+            highlevel=True,
+            behavior=self.form_mapping_info.behavior,
+        )
 
 
 def _report_failure(exception, call_time, *args, **kwargs):
@@ -1142,27 +1158,27 @@ class _UprootRead(UprootReadMixin):
                 (result, counters), duration = with_duration(self._call_impl)(
                     i, start, stop
                 )
-                return (
-                    result,
-                    _report_success(
+                return {
+                    "data": result,
+                    "ioreport": _report_success(
                         duration,
                         self.ttrees[i],
                         start,
                         stop,
                         counters=counters,
                     ),
-                )
+                }
             except self.allowed_exceptions as err:
-                return (
-                    self.mock_empty(backend="cpu"),
-                    _report_failure(
+                return {
+                    "data": self.mock_empty(backend="cpu"),
+                    "ioreport": _report_failure(
                         err,
                         call_time,
                         self.ttrees[i],
                         start,
                         stop,
                     ),
-                )
+                }
 
         result, _ = self._call_impl(i, start, stop)
         return result
@@ -1256,9 +1272,9 @@ which has {num_entries} entries"""
                 (result, counters), duration = with_duration(self._call_impl)(
                     file_path, object_path, i_step_or_start, n_steps_or_stop, is_chunk
                 )
-                return (
-                    result,
-                    _report_success(
+                return {
+                    "data": result,
+                    "ioreport": _report_success(
                         duration,
                         file_path,
                         object_path,
@@ -1267,11 +1283,11 @@ which has {num_entries} entries"""
                         is_chunk,
                         counters=counters,
                     ),
-                )
+                }
             except self.allowed_exceptions as err:
-                return (
-                    self.mock_empty(backend="cpu"),
-                    _report_failure(
+                return {
+                    "data": self.mock_empty(backend="cpu"),
+                    "ioreport": _report_failure(
                         err,
                         call_time,
                         file_path,
@@ -1280,7 +1296,7 @@ which has {num_entries} entries"""
                         n_steps_or_stop,
                         is_chunk,
                     ),
-                )
+                }
 
         result, _ = self._call_impl(
             file_path, object_path, i_step_or_start, n_steps_or_stop, is_chunk
