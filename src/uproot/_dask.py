@@ -898,7 +898,7 @@ class TrivialFormMappingInfo(ImplementsFormMappingInfo):
         keys: set[str] = set()
         for buffer_key in buffer_keys:
             # Identify form key
-            form_key, attribute = buffer_key.replace("@.", "<root>.").rsplit(
+            form_key, *attribute = buffer_key.replace("@.", "<root>.").rsplit(
                 "-", maxsplit=1
             )
             # Identify key from form_key
@@ -1046,14 +1046,22 @@ class UprootReadMixin:
         return self.expected_form
 
     def project(self, columns) -> T:
-        from dask_awkward.lib.utils import _buf_to_col
-
-        from IPython import embed; embed()
-        keys = [_buf_to_col(c).replace(".", "_") for c in columns]
+        # translate buffer keys to TBranch keys
+        keys = self.form_mapping_info.keys_for_buffer_keys(columns)
         return self.project_keys(keys)
 
     def project_keys(self: T, keys: frozenset[str]) -> T:
         raise NotImplementedError
+
+
+    def mock_empty(self, backend) -> AwkArray:
+        awkward = uproot.extras.awkward()
+        return awkward.to_backend(
+            self.expected_form.length_zero_array(highlevel=False),
+            backend=backend,
+            highlevel=True,
+            behavior=self.form_mapping_info.behavior,
+        )
 
 
 def _report_failure(exception, call_time, *args, **kwargs):
@@ -1150,27 +1158,27 @@ class _UprootRead(UprootReadMixin):
                 (result, counters), duration = with_duration(self._call_impl)(
                     i, start, stop
                 )
-                return (
-                    result,
-                    _report_success(
+                return {
+                    "data": result,
+                    "ioreport": _report_success(
                         duration,
                         self.ttrees[i],
                         start,
                         stop,
                         counters=counters,
                     ),
-                )
+                }
             except self.allowed_exceptions as err:
-                return (
-                    self.mock_empty(backend="cpu"),
-                    _report_failure(
+                return {
+                    "data": self.mock_empty(backend="cpu"),
+                    "ioreport": _report_failure(
                         err,
                         call_time,
                         self.ttrees[i],
                         start,
                         stop,
                     ),
-                )
+                }
 
         result, _ = self._call_impl(i, start, stop)
         return result
@@ -1264,9 +1272,9 @@ which has {num_entries} entries"""
                 (result, counters), duration = with_duration(self._call_impl)(
                     file_path, object_path, i_step_or_start, n_steps_or_stop, is_chunk
                 )
-                return (
-                    result,
-                    _report_success(
+                return {
+                    "data": result,
+                    "ioreport": _report_success(
                         duration,
                         file_path,
                         object_path,
@@ -1275,11 +1283,11 @@ which has {num_entries} entries"""
                         is_chunk,
                         counters=counters,
                     ),
-                )
+                }
             except self.allowed_exceptions as err:
-                return (
-                    self.mock_empty(backend="cpu"),
-                    _report_failure(
+                return {
+                    "data": self.mock_empty(backend="cpu"),
+                    "ioreport": _report_failure(
                         err,
                         call_time,
                         file_path,
@@ -1288,7 +1296,7 @@ which has {num_entries} entries"""
                         n_steps_or_stop,
                         is_chunk,
                     ),
-                )
+                }
 
         result, _ = self._call_impl(
             file_path, object_path, i_step_or_start, n_steps_or_stop, is_chunk
